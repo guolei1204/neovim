@@ -1,0 +1,82 @@
+name: Build Neovim for macOS 10.15
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  build-macos-1015:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14]  # 使用当前可用的 runner
+        arch: [x86_64, arm64]
+    
+    runs-on: ${{ matrix.runner }}
+    
+    env:
+      # ⚠️ 关键：设置部署目标为 10.15
+      MACOSX_DEPLOYMENT_TARGET: 10.15
+      # 显式指定 C++ 编译器（部署目标较低时必需）
+      DEPS_CMAKE_FLAGS: "-DCMAKE_CXX_COMPILER=$(xcrun -find c++)"
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 需要完整历史记录用于版本检测
+
+      - name: Install dependencies
+        run: |
+          brew install ninja libtool automake libuv luajit luv msgpack tree-sitter
+          # 可选：安装旧版 SDK（如果需要）
+          # brew install --cask xcode
+
+      - name: Build dependencies (with deployment target)
+        run: |
+          cmake -S cmake.deps -B .deps -G Ninja \
+            -D CMAKE_BUILD_TYPE=Release \
+            -D CMAKE_OSX_DEPLOYMENT_TARGET=10.15 \
+            -D CMAKE_CXX_COMPILER=$(xcrun -find c++) \
+            -D CMAKE_FIND_FRAMEWORK=NEVER
+          cmake --build .deps --config Release
+
+      - name: Build Neovim (with deployment target)
+        run: |
+          cmake -B build -G Ninja \
+            -D CMAKE_BUILD_TYPE=Release \
+            -D CMAKE_OSX_DEPLOYMENT_TARGET=10.15 \
+            -D CMAKE_CXX_COMPILER=$(xcrun -find c++) \
+            -D ENABLE_LIBINTL=OFF \
+            -D CMAKE_FIND_FRAMEWORK=NEVER
+          cmake --build build --config Release
+
+      - name: Verify deployment target
+        run: |
+          # 检查生成的二进制文件是否正确设置了部署目标
+          otool -l build/bin/nvim | grep -A 3 LC_VERSION_MIN_MACOSX
+          # 或使用 vtool（macOS 14+）
+          vtool -show build/bin/nvim | grep minos
+
+      - name: Package release
+        run: |
+          cd build
+          cpack -G TGZ --config CPackConfig.cmake
+          mv nvim-macos-*.tar.gz nvim-macos-${{ matrix.arch }}-10.15.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvim-macos-${{ matrix.arch }}-10.15
+          path: build/nvim-macos-*-10.15.tar.gz
+          retention-days: 30
+
+      - name: Create GitHub Release (tagged builds only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/nvim-macos-*-10.15.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
